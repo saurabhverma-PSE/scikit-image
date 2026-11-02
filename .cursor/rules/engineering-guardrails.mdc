@@ -1,0 +1,19 @@
+---
+description: Engineering guardrails for safe contributions
+alwaysApply: true
+---
+
+# Engineering Guardrails
+
+When planning or implementing changes in this repository:
+
+- Inspect the current repository before making assumptions about architecture, conventions, APIs, tests, or validation.
+- Follow existing repository patterns unless the task explicitly requires changing them.
+- Preserve existing behavior and backward compatibility unless an approved requirement explicitly says otherwise.
+- Treat public API and compatibility changes as higher risk. Identify affected callers and compatibility requirements before implementation.
+- Never weaken, remove, or bypass tests, validation, linting, or CI checks simply to make a change pass.
+- Keep changes scoped to the requested task. Do not introduce unrelated refactors or dependencies.
+- Use only repository content and explicitly approved task context. Do not pull in external code, data, or context unless the workflow explicitly allows it.
+- Surface ambiguous requirements, conflicting conventions, security concerns, or consequential design decisions instead of silently choosing an approach.
+- Human approval is required before implementing a contribution plan when the workflow defines an approval gate.
+- The engineer remains responsible for reviewing and approving agent-generated work.
