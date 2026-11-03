@@ -685,6 +685,24 @@ def test_triangle_nbins_compat():
         with pytest.raises(ValueError, match="conflicting values"):
             threshold_triangle(image, n_bins, n_bins=n_bins)
 
+    # 16 bins changes the threshold on this float image (the default is 256),
+    # so these calls show that ``nbins`` is forwarded.
+    nondefault_bins = 16
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        expected_nondefault = threshold_triangle(image, n_bins=nondefault_bins)
+        assert expected_nondefault != threshold_triangle(image, n_bins=256)
+
+    with pytest.warns(FutureWarning, match=message) as record:
+        from_keyword_nondefault = threshold_triangle(image, nbins=nondefault_bins)
+    assert len(record) == 1
+    assert from_keyword_nondefault == expected_nondefault
+
+    with pytest.warns(FutureWarning, match=message) as record:
+        from_positional_nondefault = threshold_triangle(image, nondefault_bins)
+    assert len(record) == 1
+    assert from_positional_nondefault == expected_nondefault
+
 
 def test_triangle_flip():
     # Depending on the skewness, the algorithm flips the histogram.
