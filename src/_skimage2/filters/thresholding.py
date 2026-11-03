@@ -8,7 +8,12 @@ import numpy as np
 from scipy import ndimage as ndi
 
 from ._gaussian import gaussian
-from _skimage2._shared.utils import _supported_float_type, warn
+from _skimage2._shared.utils import (
+    DEPRECATED,
+    _supported_float_type,
+    deprecate_parameter,
+    warn,
+)
 from _skimage2._shared.version_requirements import require
 from ..exposure import histogram
 from ..filters._multiotsu import (
@@ -911,16 +916,22 @@ def threshold_mean(image):
     return np.mean(image)
 
 
-def threshold_triangle(image, nbins=256):
+@deprecate_parameter(
+    'nbins', new_name='n_bins', start_version='0.27', stop_version='0.29'
+)
+def threshold_triangle(image, nbins=DEPRECATED, *, n_bins=256):
     """Return threshold value based on the triangle algorithm.
 
     Parameters
     ----------
     image : (M, N[, ...]) ndarray
         Grayscale input image.
-    nbins : int, optional
+    n_bins : int, optional
         Number of bins used to calculate histogram. This value is ignored for
         integer arrays.
+
+        .. versionadded:: 0.27
+            Replaces deprecated parameter `nbins`.
 
     Returns
     -------
@@ -944,9 +955,9 @@ def threshold_triangle(image, nbins=256):
     >>> thresh = threshold_triangle(image)
     >>> binary = image > thresh
     """
-    # nbins is ignored for integer arrays
+    # n_bins is ignored for integer arrays
     # so, we recalculate the effective nbins.
-    hist, bin_centers = histogram(image.reshape(-1), nbins, source_range='image')
+    hist, bin_centers = histogram(image.reshape(-1), n_bins, source_range='image')
     nbins = len(hist)
 
     # Find peak, lowest and highest gray levels.
