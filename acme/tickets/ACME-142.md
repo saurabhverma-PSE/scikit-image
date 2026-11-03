@@ -12,7 +12,7 @@ the change for normal review and CI.
 
 Do not weaken existing compatibility, testing, or validation guarantees.
 
-## Acceptance Criteriagit diff -- acme/tickets/ACME-142.md
+## Acceptance Criteria
 
 - Existing behavior remains unchanged.
 - Existing callers remain supported through the appropriate compatibility path.
