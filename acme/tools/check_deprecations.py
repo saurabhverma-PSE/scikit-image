@@ -1,24 +1,33 @@
 #!/usr/bin/env python3
 """Check governance rules for new or modified ``deprecate_parameter`` decorators.
 
-Compare ``HEAD`` with the merge base of ``--base-ref``. A decorator is checked
-when its call is new or its arguments changed. An identical call in the base
-version of the same file is left alone, including after a rename.
+Compare ``HEAD`` with the merge base of ``--base-ref``. A
+``deprecate_parameter(...)`` call is checked when it is new or its arguments
+changed. An identical call in the base version of the same file is left alone,
+including when Git reports that file as a rename or a copy.
+
+Recognized calls are direct decorators (``@deprecate_parameter(...)``),
+assignment aliases (``alias = deprecate_parameter(...)``), and immediate
+wrappers (``deprecate_parameter(...)(func)``).
 
 Rules that this repository does not spell out mechanically:
 
-- Match a call named ``deprecate_parameter``, including
-  ``@module.deprecate_parameter(...)``. An alias applied later
-  (``alias = deprecate_parameter(...)``) is not a decorator.
-- ``start_version`` must equal the major.minor prefix of the first module-level
-  ``__version__`` string in ``src/skimage/__init__.py`` at HEAD
-  (``0.27.0rc2.dev0`` -> ``0.27``).
-- ``stop_version`` must exactly match a ``Version X.Y`` heading in ``TODO.txt``
-  at HEAD, and that section must contain the parameter name in backticks.
-- The deprecated name, ``start_version``, and ``stop_version`` must be string
-  literals. Other arguments may be dynamic.
+- Match a call whose name or attribute is ``deprecate_parameter``. Import
+  aliases of that name are not resolved.
+- ``start_version`` must normalize to the major.minor prefix of the first
+  module-level ``__version__`` string in ``src/skimage/__init__.py`` at HEAD
+  (``0.27.0rc2.dev0`` -> ``0.27``). Literal ``X.Y`` and ``X.Y.0`` both normalize
+  to ``X.Y``. Any other literal, and any dynamic value, is rejected.
+- ``stop_version`` is normalized the same way and must match a ``Version X.Y``
+  heading in ``TODO.txt`` at HEAD. That section must contain the parameter
+  name in backticks.
+- The deprecated name must be a string literal. Other arguments, such as
+  ``template``, may be dynamic.
 - Blobs come from Git, not the uncommitted worktree. Every changed ``*.py``
   file is inspected.
+- Copy pairing uses Git's similarity check (``--find-copies --find-copies-harder``).
+  A new module that Git does not pair with a source is treated as an addition,
+  and its calls are checked as new.
 """
 
 from __future__ import annotations
@@ -38,6 +47,7 @@ _DECORATOR = "deprecate_parameter"
 _VERSION_HEADING = re.compile(r"^Version (\d+\.\d+)\s*$")
 _UNDERLINE = re.compile(r"-{3,}\s*$")
 _MAJOR_MINOR = re.compile(r"^(\d+)\.(\d+)")
+_VERSION_LITERAL = re.compile(r"^(\d+)\.(\d+)(?:\.0)?$")
 
 
 class InspectionError(Exception):
@@ -154,15 +164,17 @@ def todo_sections(source: str) -> dict[str, str]:
 
 
 def extract_decorators(source: str) -> list[DecoratorFact]:
-    """Return ``deprecate_parameter`` decorators in source order."""
+    """Return every ``deprecate_parameter(...)`` call.
+
+    Direct decorators, ``alias = deprecate_parameter(...)``, and
+    ``deprecate_parameter(...)(func)`` are the same kind of call. Each call is
+    recorded once, at the call itself.
+    """
     facts: list[DecoratorFact] = []
     for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        for decorator in node.decorator_list:
-            call = _deprecate_call(decorator)
-            if call is not None:
-                facts.append(_fact(call))
+        call = _deprecate_call(node)
+        if call is not None:
+            facts.append(_fact(call))
     return facts
 
 
@@ -271,8 +283,8 @@ def _fact(call: ast.Call) -> DecoratorFact:
     return DecoratorFact(
         line=call.lineno,
         parameter=parameter,
-        start_version=_required_literal(keywords, "start_version", problems),
-        stop_version=_required_literal(keywords, "stop_version", problems),
+        start_version=_required_version(keywords, "start_version", problems),
+        stop_version=_required_version(keywords, "stop_version", problems),
         problems=tuple(problems),
         fingerprint=ast.dump(call, include_attributes=False),
     )
@@ -308,18 +320,34 @@ def _parameter(
     return value
 
 
-def _required_literal(
+def _required_version(
     keywords: dict[str, ast.expr], field: str, problems: list[str]
 ) -> str | None:
     if field not in keywords:
         problems.append(f"missing {field}; expected a keyword string literal")
         return None
-    value = _string_literal(keywords[field])
-    if value is None:
+    raw = _string_literal(keywords[field])
+    if raw is None:
         problems.append(
             f"{field} is unsupported or dynamically computed; expected a string literal"
         )
-    return value
+        return None
+    normalized = _normalize_version(raw)
+    if normalized is None:
+        problems.append(
+            f"{field} {raw!r} is not a supported version literal; "
+            "expected 'X.Y' or 'X.Y.0'"
+        )
+        return None
+    return normalized
+
+
+def _normalize_version(value: str) -> str | None:
+    """Return ``major.minor`` for ``X.Y`` or ``X.Y.0``."""
+    match = _VERSION_LITERAL.fullmatch(value)
+    if match is None:
+        return None
+    return f"{match.group(1)}.{match.group(2)}"
 
 
 def _string_literal(node: ast.AST) -> str | None:
@@ -355,11 +383,23 @@ def _changed_python_files(root: Path, merge_base: str) -> list[tuple[str, str | 
     """Return ``(head path, base path)`` for changed Python files.
 
     Added files have no base path. Renames and copies keep the old path so an
-    unchanged decorator is not treated as new.
+    unchanged call is not treated as new. ``--find-copies-harder`` lets Git
+    use an unmodified file as the copy source. A new file Git does not pair
+    stays an addition: similarity below Git's default threshold has no reliable
+    source, and this checker does not guess one.
     """
     raw = _stdout(
         root,
-        ["diff", "-z", "--name-status", "--find-renames", merge_base, "HEAD"],
+        [
+            "diff",
+            "-z",
+            "--name-status",
+            "--find-renames",
+            "--find-copies",
+            "--find-copies-harder",
+            merge_base,
+            "HEAD",
+        ],
         "list files changed since the merge base",
     )
     parts = raw.split(b"\0")

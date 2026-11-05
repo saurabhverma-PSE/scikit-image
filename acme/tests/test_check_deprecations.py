@@ -438,31 +438,247 @@ def test_missing_base_ref_is_an_inspection_failure(repo: TemporaryRepo) -> None:
     assert "deprecation governance check failed" in completed.stdout
 
 
+def test_assignment_alias_with_wrong_version_fails(repo: TemporaryRepo) -> None:
+    path = "src/_skimage2/feature/blob.py"
+    _seed(repo, _passing_todo(), (path, "x = 1\n"))
+    repo.write(
+        path,
+        '''\
+_deprecate_threshold_rel = deprecate_parameter(
+    deprecated_name="threshold_rel",
+    start_version="0.26",
+    stop_version="0.29",
+)
+
+
+@_deprecate_threshold_rel
+def blob_dog(image):
+    return image
+''',
+    )
+    repo.commit("add alias")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode != 0
+    locations = [
+        line for line in completed.stdout.splitlines() if line.startswith(f"{path}:")
+    ]
+    assert locations
+    assert all(
+        line.startswith(f"{path}:1: parameter 'threshold_rel':") for line in locations
+    )
+    assert "start_version '0.26'" in completed.stdout
+
+
+def test_unchanged_assignment_alias_is_ignored(repo: TemporaryRepo) -> None:
+    path = "src/_skimage2/feature/blob.py"
+    legacy = '''\
+_deprecate_threshold_rel = deprecate_parameter(
+    deprecated_name="threshold_rel",
+    start_version="0.26",
+    stop_version="0.29",
+)
+
+
+@_deprecate_threshold_rel
+def blob_dog(image):
+    return image
+'''
+    _seed(repo, _todo({"0.29": "* Remove `threshold_rel`."}), (path, legacy))
+    repo.write(path, legacy + "\n\ndef helper(image):\n    return image\n")
+    repo.commit("touch alias module")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "threshold_rel" not in completed.stdout
+
+
+def test_immediate_call_wrapper_with_dynamic_version_fails(repo: TemporaryRepo) -> None:
+    path = "src/_skimage2/measure/fit.py"
+    _seed(repo, _passing_todo(), (path, "x = 1\n"))
+    repo.write(
+        path,
+        '''\
+START = "0.27"
+STOP = "0.29"
+
+
+def _deprecate_model_params(func):
+    """Wrap func with a parameter deprecation."""
+    return deprecate_parameter(
+        "params",
+        start_version=START,
+        stop_version=STOP,
+    )(func)
+''',
+    )
+    repo.commit("add wrapper")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode != 0
+    locations = [
+        line for line in completed.stdout.splitlines() if line.startswith(f"{path}:")
+    ]
+    assert locations
+    assert all(line.startswith(f"{path}:7: parameter 'params':") for line in locations)
+    assert "start_version is unsupported or dynamically computed" in completed.stdout
+    assert "stop_version is unsupported or dynamically computed" in completed.stdout
+
+
+def test_unchanged_immediate_call_wrapper_is_ignored(repo: TemporaryRepo) -> None:
+    path = "src/_skimage2/measure/fit.py"
+    legacy = '''\
+def _deprecate_model_params(func):
+    return deprecate_parameter(
+        "params",
+        start_version=START,
+        stop_version=STOP,
+    )(func)
+'''
+    _seed(repo, _todo({"0.29": "* Unrelated."}), (path, legacy))
+    repo.write(path, legacy + "\n\ndef helper(func):\n    return func\n")
+    repo.commit("touch wrapper module")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "params" not in completed.stdout
+
+
+def test_patch_zero_versions_match_major_minor(repo: TemporaryRepo) -> None:
+    path = "src/_skimage2/filters/thresholding.py"
+    _seed(repo, _passing_todo(), (path, "x = 1\n"))
+    repo.write(
+        path,
+        '''\
+@deprecate_parameter("nbins", start_version="0.27.0", stop_version="0.29.0")
+def threshold_triangle(image):
+    return image
+''',
+    )
+    repo.commit("patch zero versions")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_nonzero_patch_version_is_rejected(repo: TemporaryRepo) -> None:
+    path = "src/_skimage2/filters/thresholding.py"
+    _seed(repo, _passing_todo(), (path, "x = 1\n"))
+    repo.write(
+        path,
+        '''\
+@deprecate_parameter("nbins", start_version="0.27.1", stop_version="0.29")
+def threshold_triangle(image):
+    return image
+''',
+    )
+    repo.commit("nonzero start patch")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode != 0
+    assert (
+        "start_version '0.27.1' is not a supported version literal" in completed.stdout
+    )
+
+    repo.write(
+        path,
+        '''\
+@deprecate_parameter("nbins", start_version="0.27", stop_version="0.29.1")
+def threshold_triangle(image):
+    return image
+''',
+    )
+    repo.commit("nonzero stop patch")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode != 0
+    assert (
+        "stop_version '0.29.1' is not a supported version literal" in completed.stdout
+    )
+
+
+def test_copied_module_keeps_unchanged_legacy_decorator(repo: TemporaryRepo) -> None:
+    source = "src/_skimage2/restoration/_rolling_ball.py"
+    destination = "src/_skimage2/restoration/_rolling_ball_copy.py"
+    legacy = '''\
+@deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+def rolling_ball():
+    return 0
+'''
+    _seed(repo, _todo({"0.28": "* Unrelated."}), (source, legacy))
+    repo.write(destination, legacy)
+    repo.commit("copy module")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "num_threads" not in completed.stdout
+
+
+def test_copied_module_with_changed_decorator_is_checked(repo: TemporaryRepo) -> None:
+    source = "src/_skimage2/restoration/_rolling_ball.py"
+    destination = "src/_skimage2/restoration/_rolling_ball_copy.py"
+    _seed(
+        repo,
+        _todo({"0.28": "* Unrelated."}),
+        (
+            source,
+            '''\
+@deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+def rolling_ball():
+    return 0
+''',
+        ),
+    )
+    repo.write(
+        destination,
+        '''\
+@deprecate_parameter("num_threads", start_version="0.26", stop_version="0.30")
+def rolling_ball():
+    return 0
+''',
+    )
+    repo.commit("copy and retarget stop version")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode != 0
+    assert "parameter 'num_threads'" in completed.stdout
+    assert destination in completed.stdout
+
+
 def test_acme_142_passes_against_integration_branch(tmp_path: Path) -> None:
     """Copy ACME-142 and the integration branch into a throwaway repository."""
-    head_ok = _git(REAL_ROOT, "rev-parse", "--verify", "--quiet", ACME_142_HEAD)
-    base_ok = _git(REAL_ROOT, "rev-parse", "--verify", "--quiet", INTEGRATION_BASE)
-    if head_ok.returncode != 0 or base_ok.returncode != 0:
-        pytest.fail(
-            "ACME-142 demonstration needs local refs "
-            f"{ACME_142_HEAD!r} and {INTEGRATION_BASE!r}"
+    head_ref = _resolve_ref(ACME_142_HEAD)
+    base_ref = _resolve_ref(INTEGRATION_BASE)
+    if head_ref is None or base_ref is None:
+        pytest.skip(
+            "ACME-142 integration needs a local or origin remote-tracking ref "
+            f"for {ACME_142_HEAD!r} and {INTEGRATION_BASE!r}"
         )
 
     changed = _git(
         REAL_ROOT,
         "diff",
         "--name-only",
-        f"{INTEGRATION_BASE}...{ACME_142_HEAD}",
+        f"{base_ref}...{head_ref}",
     )
     assert changed.returncode == 0, changed.stderr
     paths = set(changed.stdout.splitlines())
     paths.update(["src/skimage/__init__.py", "TODO.txt"])
 
     repo = TemporaryRepo(tmp_path)
-    _materialize(repo, INTEGRATION_BASE, paths)
+    _materialize(repo, base_ref, paths)
     repo.commit("integration branch snapshot")
     repo.branch(INTEGRATION_BASE)
-    _materialize(repo, ACME_142_HEAD, paths)
+    _materialize(repo, head_ref, paths)
     repo.commit("acme-142 snapshot")
 
     target = repo.path / "src/_skimage2/filters/thresholding.py"
@@ -484,6 +700,15 @@ def test_acme_142_passes_against_integration_branch(tmp_path: Path) -> None:
     assert failed.returncode != 0
     assert "parameter 'nbins'" in failed.stdout
     assert "start_version '0.26'" in failed.stdout
+
+
+def _resolve_ref(name: str) -> str | None:
+    """Return a local branch or its ``origin/`` remote-tracking ref."""
+    for candidate in (name, f"origin/{name}"):
+        completed = _git(REAL_ROOT, "rev-parse", "--verify", "--quiet", candidate)
+        if completed.returncode == 0 and completed.stdout.strip():
+            return candidate
+    return None
 
 
 def _materialize(repo: TemporaryRepo, ref: str, paths: set[str]) -> None:
