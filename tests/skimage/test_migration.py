@@ -1058,7 +1058,7 @@ SKIMAGE_API = {
     'skimage.filters:threshold_niblack(image, window_size=15, k=0.2)',
     'skimage.filters:threshold_otsu(image=None, nbins=256, *, hist=None)',
     'skimage.filters:threshold_sauvola(image, window_size=15, k=0.2, r=None)',
-    'skimage.filters:threshold_triangle(image, nbins=256)',
+    'skimage.filters:threshold_triangle(image, nbins=<DEPRECATED>, *, n_bins=256)',
     'skimage.filters:threshold_yen(image=None, nbins=256, *, hist=None)',
     'skimage.filters:try_all_threshold(image, figsize=(8, 5), verbose=True)',
     'skimage.filters:unsharp_mask(image, radius=1.0, amount=1.0, '

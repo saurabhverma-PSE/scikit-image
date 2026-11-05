@@ -1,4 +1,5 @@
 import math
+import warnings
 
 import numpy as np
 import pytest
@@ -642,17 +643,65 @@ def test_triangle_uint_images():
 def test_triangle_float_images():
     text = data.text()
     int_bins = text.max() - text.min() + 1
-    # Set nbins to match the uint case and threshold as float.
-    assert round(threshold_triangle(text.astype(float), nbins=int_bins)) == 104
+    # Set n_bins to match the uint case and threshold as float.
+    assert round(threshold_triangle(text.astype(float), n_bins=int_bins)) == 104
     # Check that rescaling image to floats in unit interval is equivalent.
-    assert round(threshold_triangle(text / 255.0, nbins=int_bins) * 255) == 104
+    assert round(threshold_triangle(text / 255.0, n_bins=int_bins) * 255) == 104
     # Repeat for inverted image.
     assert (
-        round(threshold_triangle(np.invert(text).astype(float), nbins=int_bins)) == 151
+        round(threshold_triangle(np.invert(text).astype(float), n_bins=int_bins)) == 151
     )
     assert (
-        round(threshold_triangle(np.invert(text) / 255.0, nbins=int_bins) * 255) == 151
+        round(threshold_triangle(np.invert(text) / 255.0, n_bins=int_bins) * 255) == 151
     )
+
+
+def test_triangle_nbins_compat():
+    # ``nbins`` stays callable through 0.29 and forwards to ``n_bins``.
+    text = data.text()
+    image = text.astype(float)
+    n_bins = text.max() - text.min() + 1
+    message = r"`nbins` is deprecated.*`n_bins`"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        expected = threshold_triangle(image, n_bins=n_bins)
+        assert threshold_triangle(image) == threshold_triangle(image, n_bins=256)
+
+    with pytest.warns(FutureWarning, match=message) as record:
+        from_keyword = threshold_triangle(image, nbins=n_bins)
+    assert len(record) == 1
+    assert from_keyword == expected
+
+    with pytest.warns(FutureWarning, match=message) as record:
+        from_positional = threshold_triangle(image, n_bins)
+    assert len(record) == 1
+    assert from_positional == expected
+
+    with pytest.warns(FutureWarning, match=message):
+        with pytest.raises(ValueError, match="conflicting values"):
+            threshold_triangle(image, nbins=n_bins, n_bins=n_bins)
+    with pytest.warns(FutureWarning, match=message):
+        with pytest.raises(ValueError, match="conflicting values"):
+            threshold_triangle(image, n_bins, n_bins=n_bins)
+
+    # 16 bins changes the threshold on this float image (the default is 256),
+    # so these calls show that ``nbins`` is forwarded.
+    nondefault_bins = 16
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        expected_nondefault = threshold_triangle(image, n_bins=nondefault_bins)
+        assert expected_nondefault != threshold_triangle(image, n_bins=256)
+
+    with pytest.warns(FutureWarning, match=message) as record:
+        from_keyword_nondefault = threshold_triangle(image, nbins=nondefault_bins)
+    assert len(record) == 1
+    assert from_keyword_nondefault == expected_nondefault
+
+    with pytest.warns(FutureWarning, match=message) as record:
+        from_positional_nondefault = threshold_triangle(image, nondefault_bins)
+    assert len(record) == 1
+    assert from_positional_nondefault == expected_nondefault
 
 
 def test_triangle_flip():

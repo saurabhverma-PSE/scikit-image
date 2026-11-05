@@ -15,6 +15,7 @@ API Changes
 - In ``skimage.io``, remove ``imshow``, ``imshow_collection``, and ``show``. This completes their deprecation. Instead, we recommend using  matplotlib, napari, etc. for visualization (`#7994 <https://github.com/scikit-image/scikit-image/pull/7994>`_).
 - In ``skimage.feature``, deprecate the parameter ``threshold_rel`` in  ``blob_doh``, blob_dog``, and ``blob_log``. The behavior of the parameters effects were difficult to reason about. Instead, use ``threshold`` in conjunction with the new parameter ``prescale`` (`#7858 <https://github.com/scikit-image/scikit-image/pull/7858>`_).
 - In ``skimage.feature.peak_local_max``, use ``None`` as the new default for the parameters ``num_peaks`` and ``num_peaks_per_label`` – the default behavior is the same as before but passing ``numpy.inf`` is deprecated (`#8039 <https://github.com/scikit-image/scikit-image/pull/8039>`_).
+- In ``skimage.filters.threshold_triangle``, deprecate the parameter ``nbins`` in favor of ``n_bins`` (deprecated in 0.27, to be removed in 0.29).
 
 Enhancements
 ------------
