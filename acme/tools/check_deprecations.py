@@ -28,7 +28,9 @@ Rules that this repository does not spell out mechanically:
   ``tests/``, tooling under ``acme/``, and other trees are ignored.
 - Copy pairing uses Git's similarity check (``--find-copies --find-copies-harder``).
   A new module that Git does not pair with a source is treated as an addition,
-  and its calls are checked as new.
+  and its calls are checked as new. A copy or rename into production from
+  outside ``src/skimage/`` and ``src/_skimage2/`` is also treated as an
+  addition, so historical fixtures cannot be grandfathered by moving them.
 """
 
 from __future__ import annotations
@@ -66,6 +68,7 @@ class DecoratorFact:
     stop_version: str | None
     problems: tuple[str, ...]
     fingerprint: str
+    anchor: str | None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -172,11 +175,18 @@ def extract_decorators(source: str) -> list[DecoratorFact]:
     ``deprecate_parameter(...)(func)`` are the same kind of call. Each call is
     recorded once, at the call itself.
     """
+    tree = ast.parse(source)
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
     facts: list[DecoratorFact] = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         call = _deprecate_call(node)
         if call is not None:
-            facts.append(_fact(call))
+            facts.append(_fact(call, _anchor(call, parents)))
+    facts.sort(key=lambda fact: fact.line)
     return facts
 
 
@@ -185,32 +195,16 @@ def new_or_modified(
 ) -> list[DecoratorFact]:
     """Return head calls that do not match an identical base call, one for one.
 
-    Prefer a same-line match when fingerprints are equal so a newly inserted
-    duplicate reports the new line rather than the pre-existing occurrence.
-    Remaining calls still match by fingerprint only, as before.
+    Equality is still the call AST. Pairing also uses the enclosing name so an
+    identical call inserted above a shifted original is the new occurrence,
+    even when it occupies the original line number.
     """
-    remaining_base = list(base)
-    unmatched_head: list[DecoratorFact] = []
-    for fact in head:
-        match_index = next(
-            (
-                index
-                for index, base_fact in enumerate(remaining_base)
-                if base_fact.fingerprint == fact.fingerprint
-                and base_fact.line == fact.line
-            ),
-            None,
-        )
-        if match_index is None:
-            unmatched_head.append(fact)
-        else:
-            remaining_base.pop(match_index)
-
-    remaining = Counter(fact.fingerprint for fact in remaining_base)
+    remaining = Counter((fact.fingerprint, fact.anchor) for fact in base)
     introduced: list[DecoratorFact] = []
-    for fact in unmatched_head:
-        if remaining[fact.fingerprint]:
-            remaining[fact.fingerprint] -= 1
+    for fact in head:
+        key = (fact.fingerprint, fact.anchor)
+        if remaining[key]:
+            remaining[key] -= 1
         else:
             introduced.append(fact)
     return introduced
@@ -288,7 +282,7 @@ def _check_file(
     return diagnostics
 
 
-def _fact(call: ast.Call) -> DecoratorFact:
+def _fact(call: ast.Call, anchor: str | None) -> DecoratorFact:
     problems: list[str] = []
     if any(isinstance(arg, ast.Starred) for arg in call.args):
         problems.append(
@@ -311,7 +305,28 @@ def _fact(call: ast.Call) -> DecoratorFact:
         stop_version=_required_version(keywords, "stop_version", problems),
         problems=tuple(problems),
         fingerprint=ast.dump(call, include_attributes=False),
+        anchor=anchor,
     )
+
+
+def _anchor(call: ast.Call, parents: dict[ast.AST, ast.AST]) -> str | None:
+    """Name used to pair a call with its previous occurrence.
+
+    Prefer a nearby assignment target (``alias = deprecate_parameter(...)``),
+    then the enclosing function or class. The call AST is unchanged.
+    """
+    node: ast.AST | None = parents.get(call)
+    while node is not None:
+        if isinstance(node, ast.Assign):
+            names = [
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            ]
+            if len(names) == 1:
+                return names[0]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return node.name
+        node = parents.get(node)
+    return None
 
 
 def _parameter(
@@ -411,11 +426,13 @@ def _changed_python_files(root: Path, merge_base: str) -> list[tuple[str, str | 
     """Return ``(head path, base path)`` for changed production Python files.
 
     Only ``src/skimage/`` and ``src/_skimage2/`` are scanned. Added files have
-    no base path. Renames and copies keep the old path so an unchanged call is
-    not treated as new. ``--find-copies-harder`` lets Git use an unmodified
-    file as the copy source. A new file Git does not pair stays an addition:
-    similarity below Git's default threshold has no reliable source, and this
-    checker does not guess one.
+    no base path. Renames and copies that stay inside production keep the old
+    path so an unchanged call is not treated as new. A production destination
+    whose Git source is outside those trees has no base path: its calls are
+    new. ``--find-copies-harder`` lets Git use an unmodified file as the copy
+    source. A new file Git does not pair stays an addition: similarity below
+    Git's default threshold has no reliable source, and this checker does not
+    guess one.
     """
     raw = _stdout(
         root,
@@ -449,7 +466,8 @@ def _changed_python_files(root: Path, merge_base: str) -> list[tuple[str, str | 
             new_path = _decode_diff(parts[index + 1])
             index += 2
             if _is_production_python(new_path):
-                pairs.append((new_path, old_path))
+                base_path = old_path if _is_production_python(old_path) else None
+                pairs.append((new_path, base_path))
             continue
         if index >= len(parts):
             raise InspectionError(

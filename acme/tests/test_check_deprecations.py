@@ -504,8 +504,6 @@ def threshold_triangle(image):
 
 def test_duplicate_identical_call_reports_new_line(repo: TemporaryRepo) -> None:
     path = "src/_skimage2/restoration/_rolling_ball.py"
-    # Keep the existing decorator on the same line so same-line matching can
-    # preserve it while a new identical call appears earlier in the file.
     existing = '''\
 x = 1
 y = 2
@@ -533,6 +531,67 @@ def rolling_ball():
     assert completed.returncode != 0
     assert f"{path}:1: parameter 'num_threads':" in completed.stdout
     assert f"{path}:4: parameter 'num_threads':" not in completed.stdout
+
+
+def test_shifted_duplicate_is_not_grandfathered(repo: TemporaryRepo) -> None:
+    path = "src/_skimage2/restoration/_rolling_ball.py"
+    existing = '''\
+@deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+def rolling_ball():
+    return 0
+'''
+    _seed(
+        repo,
+        _todo(
+            {
+                "0.28": "* Unrelated.",
+                "0.29": "* Remove `num_threads`.",
+            }
+        ),
+        (path, existing),
+    )
+    repo.write(
+        path,
+        '''\
+@deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+def rolling_ball_extra():
+    return 1
+
+
+@deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+def rolling_ball():
+    return 0
+''',
+    )
+    repo.commit("insert identical call above existing function")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode != 0
+    assert f"{path}:1: parameter 'num_threads':" in completed.stdout
+    assert f"{path}:6: parameter 'num_threads':" not in completed.stdout
+
+    repo.write(
+        path,
+        '''\
+@deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+def rolling_ball_extra():
+    return 1
+
+
+@deprecate_parameter("num_threads", start_version="0.27", stop_version="0.29")
+def rolling_ball():
+    return 0
+''',
+    )
+    repo.commit("fix only the shifted original occurrence")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode != 0
+    assert f"{path}:1: parameter 'num_threads':" in completed.stdout
+    assert "start_version '0.26'" in completed.stdout
+    assert f"{path}:6: parameter 'num_threads':" not in completed.stdout
 
 
 def test_missing_base_ref_is_an_inspection_failure(repo: TemporaryRepo) -> None:
@@ -727,6 +786,46 @@ def rolling_ball():
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "num_threads" not in completed.stdout
+
+
+def test_copy_from_tests_into_production_is_new(repo: TemporaryRepo) -> None:
+    source = "tests/skimage2/_shared/test_utils.py"
+    destination = "src/_skimage2/_shared/copied_utils.py"
+    historical = '''\
+@deprecate_parameter("old", start_version="0.10", stop_version="0.12")
+def sample(old=None):
+    return old
+'''
+    _seed(repo, _passing_todo(), (source, historical))
+    repo.write(destination, historical)
+    repo.commit("copy historical fixture into production")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode != 0
+    assert f"{destination}:1: parameter 'old':" in completed.stdout
+    assert source not in completed.stdout
+
+
+def test_rename_from_tests_into_production_is_new(repo: TemporaryRepo) -> None:
+    source = "tests/skimage2/_shared/test_utils.py"
+    destination = "src/_skimage2/_shared/copied_utils.py"
+    historical = '''\
+@deprecate_parameter("old", start_version="0.10", stop_version="0.12")
+def sample(old=None):
+    return old
+'''
+    _seed(repo, _passing_todo(), (source, historical))
+    (repo.path / destination).parent.mkdir(parents=True, exist_ok=True)
+    move = _git(repo.path, "mv", source, destination)
+    assert move.returncode == 0, move.stderr
+    repo.commit("rename historical fixture into production")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode != 0
+    assert f"{destination}:1: parameter 'old':" in completed.stdout
+    assert source not in completed.stdout
 
 
 def test_copied_module_with_changed_decorator_is_checked(repo: TemporaryRepo) -> None:
