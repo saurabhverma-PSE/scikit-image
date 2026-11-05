@@ -533,6 +533,188 @@ def rolling_ball():
     assert f"{path}:4: parameter 'num_threads':" not in completed.stdout
 
 
+def test_renamed_function_keeps_legacy_decorator(repo: TemporaryRepo) -> None:
+    path = "src/_skimage2/restoration/_rolling_ball.py"
+    _seed(
+        repo,
+        _todo({"0.28": "* Unrelated."}),
+        (
+            path,
+            '''\
+@deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+def rolling_ball():
+    return 0
+''',
+        ),
+    )
+    repo.write(
+        path,
+        '''\
+@deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+def rolling_ball_renamed():
+    return 0
+''',
+    )
+    repo.commit("rename decorated function")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_renamed_alias_keeps_legacy_decorator(repo: TemporaryRepo) -> None:
+    path = "src/_skimage2/feature/blob.py"
+    _seed(
+        repo,
+        _todo({"0.29": "* Remove `threshold_rel`."}),
+        (
+            path,
+            '''\
+old_alias = deprecate_parameter(
+    deprecated_name="threshold_rel",
+    start_version="0.26",
+    stop_version="0.29",
+)
+
+
+@old_alias
+def blob_dog(image):
+    return image
+''',
+        ),
+    )
+    repo.write(
+        path,
+        '''\
+new_alias = deprecate_parameter(
+    deprecated_name="threshold_rel",
+    start_version="0.26",
+    stop_version="0.29",
+)
+
+
+@new_alias
+def blob_dog(image):
+    return image
+''',
+    )
+    repo.commit("rename assignment alias")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_stacked_duplicate_decorator_is_not_grandfathered(repo: TemporaryRepo) -> None:
+    path = "src/_skimage2/restoration/_rolling_ball.py"
+    _seed(
+        repo,
+        _todo({"0.28": "* Unrelated."}),
+        (
+            path,
+            '''\
+@deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+def rolling_ball():
+    return 0
+''',
+        ),
+    )
+    repo.write(
+        path,
+        '''\
+@deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+@deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+def rolling_ball():
+    return 0
+''',
+    )
+    repo.commit("stack an identical decorator")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode != 0
+    assert f"{path}:1: parameter 'num_threads':" in completed.stdout
+    assert f"{path}:2: parameter 'num_threads':" not in completed.stdout
+
+
+def test_same_name_functions_are_not_collapsed(repo: TemporaryRepo) -> None:
+    path = "src/_skimage2/restoration/_rolling_ball.py"
+    _seed(
+        repo,
+        _todo({"0.28": "* Unrelated."}),
+        (
+            path,
+            '''\
+def outer():
+    @deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+    def inner():
+        return 0
+''',
+        ),
+    )
+    repo.write(
+        path,
+        '''\
+def outer():
+    @deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+    def inner():
+        return 0
+
+
+def outer():
+    @deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+    def inner():
+        return 1
+''',
+    )
+    repo.commit("add another same-named function")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode != 0
+    assert f"{path}:8: parameter 'num_threads':" in completed.stdout
+    assert f"{path}:2: parameter 'num_threads':" not in completed.stdout
+
+
+def test_methods_in_different_classes_are_distinct(repo: TemporaryRepo) -> None:
+    path = "src/skimage/filters/thresholding.py"
+    _seed(
+        repo,
+        _todo({"0.28": "* Unrelated."}),
+        (
+            path,
+            '''\
+class A:
+    @deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+    def method(self):
+        return 0
+''',
+        ),
+    )
+    repo.write(
+        path,
+        '''\
+class A:
+    @deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+    def method(self):
+        return 0
+
+
+class B:
+    @deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+    def method(self):
+        return 1
+''',
+    )
+    repo.commit("add method with the same name on another class")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode != 0
+    assert f"{path}:8: parameter 'num_threads':" in completed.stdout
+    assert f"{path}:2: parameter 'num_threads':" not in completed.stdout
+
+
 def test_shifted_duplicate_is_not_grandfathered(repo: TemporaryRepo) -> None:
     path = "src/_skimage2/restoration/_rolling_ball.py"
     existing = '''\

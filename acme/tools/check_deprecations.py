@@ -37,10 +37,10 @@ from __future__ import annotations
 
 import argparse
 import ast
+import difflib
 import re
 import subprocess
 import sys
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -68,7 +68,6 @@ class DecoratorFact:
     stop_version: str | None
     problems: tuple[str, ...]
     fingerprint: str
-    anchor: str | None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -175,39 +174,145 @@ def extract_decorators(source: str) -> list[DecoratorFact]:
     ``deprecate_parameter(...)(func)`` are the same kind of call. Each call is
     recorded once, at the call itself.
     """
-    tree = ast.parse(source)
-    parents = {
-        child: parent
-        for parent in ast.walk(tree)
-        for child in ast.iter_child_nodes(parent)
-    }
     facts: list[DecoratorFact] = []
-    for node in ast.walk(tree):
+    for node in ast.walk(ast.parse(source)):
         call = _deprecate_call(node)
         if call is not None:
-            facts.append(_fact(call, _anchor(call, parents)))
+            facts.append(_fact(call))
     facts.sort(key=lambda fact: fact.line)
     return facts
 
 
 def new_or_modified(
-    base: list[DecoratorFact], head: list[DecoratorFact]
+    base_source: str,
+    head_source: str,
+    base: list[DecoratorFact],
+    head: list[DecoratorFact],
 ) -> list[DecoratorFact]:
-    """Return head calls that do not match an identical base call, one for one.
+    """Return head calls that are not the same AST call as a base call.
 
-    Equality is still the call AST. Pairing also uses the enclosing name so an
-    identical call inserted above a shifted original is the new occurrence,
-    even when it occupies the original line number.
+    Pairing follows the text diff, not names or the first identical AST.
+    An unchanged call still matches after a function, method, or alias rename,
+    and after its line number shifts. A call is new when its line was inserted,
+    or when its arguments changed. Identical decorators on same-named functions,
+    stacked decorators, and methods of different classes stay separate because
+    only unchanged lines that still belong to the same def or class are paired.
     """
-    remaining = Counter((fact.fingerprint, fact.anchor) for fact in base)
+    base_lines = base_source.splitlines()
+    head_lines = head_source.splitlines()
+    equal_map, head_kind, replaces = _line_alignment(base_lines, head_lines)
+    matched_base: set[int] = set()
+    matched_head: set[int] = set()
+    head_by_line = {fact.line: index for index, fact in enumerate(head)}
+
+    for base_index, base_fact in enumerate(base):
+        head_line = equal_map.get(base_fact.line)
+        if head_line is None:
+            continue
+        head_index = head_by_line.get(head_line)
+        if head_index is None:
+            continue
+        if head[head_index].fingerprint != base_fact.fingerprint:
+            continue
+        # A copied decorator line can sit on a new function while the original
+        # function's decorator was edited. Require the same def or class.
+        # Calls inside a function body are not decorators of the next def.
+        if _is_decorator_line(base_lines, base_fact.line) or _is_decorator_line(
+            head_lines, head_line
+        ):
+            if not _statements_correspond(
+                base_fact.line,
+                head_line,
+                base_lines,
+                head_lines,
+                equal_map,
+                replaces,
+            ):
+                continue
+        matched_base.add(base_index)
+        matched_head.add(head_index)
+
+    # In-place edits that keep the call AST (an alias rename on the same line)
+    # are not insertions. Pair those leftovers one-for-one, in order.
+    leftover_base: dict[str, list[int]] = {}
+    for base_index, base_fact in enumerate(base):
+        if base_index not in matched_base:
+            leftover_base.setdefault(base_fact.fingerprint, []).append(base_index)
+
     introduced: list[DecoratorFact] = []
-    for fact in head:
-        key = (fact.fingerprint, fact.anchor)
-        if remaining[key]:
-            remaining[key] -= 1
-        else:
-            introduced.append(fact)
+    for head_index, head_fact in enumerate(head):
+        if head_index in matched_head:
+            continue
+        if head_kind.get(head_fact.line) == "replace":
+            bucket = leftover_base.get(head_fact.fingerprint)
+            if bucket:
+                bucket.pop(0)
+                continue
+        introduced.append(head_fact)
     return introduced
+
+
+def _line_alignment(
+    base_lines: list[str], head_lines: list[str]
+) -> tuple[dict[int, int], dict[int, str], list[tuple[int, int, int, int]]]:
+    """Map unchanged base lines to head lines, and classify each head line.
+
+    Replace hunks are ``(base_start, base_end, head_start, head_end)``, inclusive.
+    """
+    matcher = difflib.SequenceMatcher(a=base_lines, b=head_lines, autojunk=False)
+    equal_map: dict[int, int] = {}
+    head_kind: dict[int, str] = {}
+    replaces: list[tuple[int, int, int, int]] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for offset in range(i2 - i1):
+                equal_map[i1 + 1 + offset] = j1 + 1 + offset
+                head_kind[j1 + 1 + offset] = "equal"
+        elif tag == "insert":
+            for line in range(j1 + 1, j2 + 1):
+                head_kind[line] = "insert"
+        elif tag == "replace":
+            for line in range(j1 + 1, j2 + 1):
+                head_kind[line] = "replace"
+            if i2 > i1 and j2 > j1:
+                replaces.append((i1 + 1, i2, j1 + 1, j2))
+    return equal_map, head_kind, replaces
+
+
+def _statements_correspond(
+    base_line: int,
+    head_line: int,
+    base_lines: list[str],
+    head_lines: list[str],
+    equal_map: dict[int, int],
+    replaces: list[tuple[int, int, int, int]],
+) -> bool:
+    """True when both calls decorate the same surviving def or class."""
+    base_stmt = _statement_line(base_lines, base_line)
+    head_stmt = _statement_line(head_lines, head_line)
+    if base_stmt is None and head_stmt is None:
+        return True
+    if base_stmt is None or head_stmt is None:
+        return False
+    if equal_map.get(base_stmt) == head_stmt:
+        return True
+    return any(
+        start_base <= base_stmt <= end_base and start_head <= head_stmt <= end_head
+        for start_base, end_base, start_head, end_head in replaces
+    )
+
+
+def _is_decorator_line(lines: list[str], line: int) -> bool:
+    return lines[line - 1].lstrip().startswith("@")
+
+
+def _statement_line(lines: list[str], after_line: int) -> int | None:
+    """Return the next ``def`` or ``class`` line after a 1-based call line."""
+    for index in range(after_line, len(lines)):
+        text = lines[index].lstrip()
+        if text.startswith(("def ", "class ", "async def ")):
+            return index + 1
+    return None
 
 
 def validate_decorator(
@@ -277,12 +382,12 @@ def _check_file(
         return [_parse_diagnostic(head_path, exc, "unable to parse Python file")]
 
     diagnostics: list[str] = []
-    for fact in new_or_modified(base_facts, head_facts):
+    for fact in new_or_modified(base_source, head_source, base_facts, head_facts):
         diagnostics.extend(validate_decorator(head_path, fact, current, sections))
     return diagnostics
 
 
-def _fact(call: ast.Call, anchor: str | None) -> DecoratorFact:
+def _fact(call: ast.Call) -> DecoratorFact:
     problems: list[str] = []
     if any(isinstance(arg, ast.Starred) for arg in call.args):
         problems.append(
@@ -305,28 +410,7 @@ def _fact(call: ast.Call, anchor: str | None) -> DecoratorFact:
         stop_version=_required_version(keywords, "stop_version", problems),
         problems=tuple(problems),
         fingerprint=ast.dump(call, include_attributes=False),
-        anchor=anchor,
     )
-
-
-def _anchor(call: ast.Call, parents: dict[ast.AST, ast.AST]) -> str | None:
-    """Name used to pair a call with its previous occurrence.
-
-    Prefer a nearby assignment target (``alias = deprecate_parameter(...)``),
-    then the enclosing function or class. The call AST is unchanged.
-    """
-    node: ast.AST | None = parents.get(call)
-    while node is not None:
-        if isinstance(node, ast.Assign):
-            names = [
-                target.id for target in node.targets if isinstance(target, ast.Name)
-            ]
-            if len(names) == 1:
-                return names[0]
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            return node.name
-        node = parents.get(node)
-    return None
 
 
 def _parameter(
