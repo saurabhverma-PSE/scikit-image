@@ -23,8 +23,9 @@ Rules that this repository does not spell out mechanically:
   name in backticks.
 - The deprecated name must be a string literal. Other arguments, such as
   ``template``, may be dynamic.
-- Blobs come from Git, not the uncommitted worktree. Every changed ``*.py``
-  file is inspected.
+- Blobs come from Git, not the uncommitted worktree. Only changed ``*.py`` files
+  under ``src/skimage/`` and ``src/_skimage2/`` are inspected. Fixtures under
+  ``tests/``, tooling under ``acme/``, and other trees are ignored.
 - Copy pairing uses Git's similarity check (``--find-copies --find-copies-harder``).
   A new module that Git does not pair with a source is treated as an addition,
   and its calls are checked as new.
@@ -44,6 +45,7 @@ from pathlib import Path
 VERSION_PATH = "src/skimage/__init__.py"
 TODO_PATH = "TODO.txt"
 _DECORATOR = "deprecate_parameter"
+_PRODUCTION_PREFIXES = ("src/skimage/", "src/_skimage2/")
 _VERSION_HEADING = re.compile(r"^Version (\d+\.\d+)\s*$")
 _UNDERLINE = re.compile(r"-{3,}\s*$")
 _MAJOR_MINOR = re.compile(r"^(\d+)\.(\d+)")
@@ -181,10 +183,32 @@ def extract_decorators(source: str) -> list[DecoratorFact]:
 def new_or_modified(
     base: list[DecoratorFact], head: list[DecoratorFact]
 ) -> list[DecoratorFact]:
-    """Return head calls that do not match an identical base call, one for one."""
-    remaining = Counter(fact.fingerprint for fact in base)
-    introduced: list[DecoratorFact] = []
+    """Return head calls that do not match an identical base call, one for one.
+
+    Prefer a same-line match when fingerprints are equal so a newly inserted
+    duplicate reports the new line rather than the pre-existing occurrence.
+    Remaining calls still match by fingerprint only, as before.
+    """
+    remaining_base = list(base)
+    unmatched_head: list[DecoratorFact] = []
     for fact in head:
+        match_index = next(
+            (
+                index
+                for index, base_fact in enumerate(remaining_base)
+                if base_fact.fingerprint == fact.fingerprint
+                and base_fact.line == fact.line
+            ),
+            None,
+        )
+        if match_index is None:
+            unmatched_head.append(fact)
+        else:
+            remaining_base.pop(match_index)
+
+    remaining = Counter(fact.fingerprint for fact in remaining_base)
+    introduced: list[DecoratorFact] = []
+    for fact in unmatched_head:
         if remaining[fact.fingerprint]:
             remaining[fact.fingerprint] -= 1
         else:
@@ -379,14 +403,19 @@ def _underlined(lines: list[str], index: int) -> bool:
     )
 
 
-def _changed_python_files(root: Path, merge_base: str) -> list[tuple[str, str | None]]:
-    """Return ``(head path, base path)`` for changed Python files.
+def _is_production_python(path: str) -> bool:
+    return path.endswith(".py") and path.startswith(_PRODUCTION_PREFIXES)
 
-    Added files have no base path. Renames and copies keep the old path so an
-    unchanged call is not treated as new. ``--find-copies-harder`` lets Git
-    use an unmodified file as the copy source. A new file Git does not pair
-    stays an addition: similarity below Git's default threshold has no reliable
-    source, and this checker does not guess one.
+
+def _changed_python_files(root: Path, merge_base: str) -> list[tuple[str, str | None]]:
+    """Return ``(head path, base path)`` for changed production Python files.
+
+    Only ``src/skimage/`` and ``src/_skimage2/`` are scanned. Added files have
+    no base path. Renames and copies keep the old path so an unchanged call is
+    not treated as new. ``--find-copies-harder`` lets Git use an unmodified
+    file as the copy source. A new file Git does not pair stays an addition:
+    similarity below Git's default threshold has no reliable source, and this
+    checker does not guess one.
     """
     raw = _stdout(
         root,
@@ -419,7 +448,7 @@ def _changed_python_files(root: Path, merge_base: str) -> list[tuple[str, str | 
             old_path = _decode_diff(parts[index])
             new_path = _decode_diff(parts[index + 1])
             index += 2
-            if new_path.endswith(".py"):
+            if _is_production_python(new_path):
                 pairs.append((new_path, old_path))
             continue
         if index >= len(parts):
@@ -428,7 +457,7 @@ def _changed_python_files(root: Path, merge_base: str) -> list[tuple[str, str | 
             )
         path = _decode_diff(parts[index])
         index += 1
-        if code == "D" or not path.endswith(".py"):
+        if code == "D" or not _is_production_python(path):
             continue
         pairs.append((path, None if code == "A" else path))
     return pairs

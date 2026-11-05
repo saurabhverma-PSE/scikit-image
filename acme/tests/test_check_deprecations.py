@@ -428,6 +428,113 @@ def threshold_triangle():
     assert f"{skimage2}:1: parameter 'nbins':" in completed.stdout
 
 
+def test_historical_fixtures_outside_production_are_ignored(
+    repo: TemporaryRepo,
+) -> None:
+    production = "src/_skimage2/filters/thresholding.py"
+    test_fixture = "tests/skimage2/_shared/test_utils.py"
+    acme_tool = "acme/tools/example.py"
+    historical = '''\
+@deprecate_parameter("old", start_version="0.10", stop_version="0.12")
+def sample(old=None):
+    return old
+'''
+    _seed(
+        repo,
+        _passing_todo(),
+        (production, "x = 1\n"),
+        (test_fixture, "x = 1\n"),
+        (acme_tool, "x = 1\n"),
+    )
+    repo.write(test_fixture, historical)
+    repo.write(acme_tool, historical)
+    repo.write(
+        production,
+        '''\
+@deprecate_parameter("nbins", start_version="0.27", stop_version="0.29")
+def threshold_triangle(image):
+    return image
+''',
+    )
+    repo.commit("fixtures plus valid production deprecation")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "tests/" not in completed.stdout
+    assert "acme/" not in completed.stdout
+    assert "parameter 'old'" not in completed.stdout
+
+
+def test_invalid_production_deprecation_still_fails_with_fixtures_present(
+    repo: TemporaryRepo,
+) -> None:
+    production = "src/skimage/filters/thresholding.py"
+    test_fixture = "tests/skimage/filters/test_thresholding.py"
+    historical = '''\
+@deprecate_parameter("old", start_version="0.10", stop_version="0.12")
+def sample(old=None):
+    return old
+'''
+    _seed(
+        repo,
+        _passing_todo(),
+        (production, "x = 1\n"),
+        (test_fixture, "x = 1\n"),
+    )
+    repo.write(test_fixture, historical)
+    repo.write(
+        production,
+        '''\
+@deprecate_parameter("nbins", start_version="0.20", stop_version="0.29")
+def threshold_triangle(image):
+    return image
+''',
+    )
+    repo.commit("invalid production with ignored fixture")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode != 0
+    assert f"{production}:1: parameter 'nbins':" in completed.stdout
+    assert "start_version '0.20'" in completed.stdout
+    assert "parameter 'old'" not in completed.stdout
+    assert test_fixture not in completed.stdout
+
+
+def test_duplicate_identical_call_reports_new_line(repo: TemporaryRepo) -> None:
+    path = "src/_skimage2/restoration/_rolling_ball.py"
+    # Keep the existing decorator on the same line so same-line matching can
+    # preserve it while a new identical call appears earlier in the file.
+    existing = '''\
+x = 1
+y = 2
+
+@deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+def rolling_ball():
+    return 0
+'''
+    _seed(repo, _todo({"0.28": "* Unrelated."}), (path, existing))
+    repo.write(
+        path,
+        '''\
+@deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+def rolling_ball_extra():
+    return 1
+@deprecate_parameter("num_threads", start_version="0.26", stop_version="0.28")
+def rolling_ball():
+    return 0
+''',
+    )
+    repo.commit("add identical duplicate before existing call")
+
+    completed = _run_checker(repo.path, "baseline")
+
+    assert completed.returncode != 0
+    assert f"{path}:1: parameter 'num_threads':" in completed.stdout
+    assert f"{path}:4: parameter 'num_threads':" not in completed.stdout
+
+
 def test_missing_base_ref_is_an_inspection_failure(repo: TemporaryRepo) -> None:
     _seed(repo, _passing_todo(), ("src/_skimage2/filters/thresholding.py", "x = 1\n"))
 
