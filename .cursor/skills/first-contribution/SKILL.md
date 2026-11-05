@@ -65,6 +65,28 @@ Identify:
 
 If the repository contains conflicting patterns or the safe approach is unclear, surface the conflict rather than choosing silently.
 
+### Public API and deprecation checklist
+
+For changes to public APIs, parameters, or deprecated behavior:
+
+- Search for comparable changes and existing uses of
+  `deprecate_parameter` before proposing an approach.
+- Verify the supported deprecation and removal versions from
+  current repository evidence; do not assume a release timeline.
+- Inspect affected callers, both relevant test suites, and
+  migration or public-signature snapshot tests where applicable.
+- Check warning handling, including configurations such as
+  `filterwarnings=error`, and plan explicit warning assertions.
+- Cover old and new calling patterns, positional and keyword
+  compatibility, and non-default argument values in tests.
+- Identify release-note and deprecation-tracking requirements,
+  including the appropriate files and formats.
+- Record any conflicting conventions or compatibility decisions
+  in the contribution plan for human approval.
+
+Apply this checklist only when relevant to the proposed change.
+Confirm paths and conventions against the current checkout.
+
 ## 5. Propose validation
 
 Define how the change should be checked before implementation.
