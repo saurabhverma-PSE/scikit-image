@@ -19,6 +19,8 @@ jobs:
     steps:
       - name: Check out PR code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -32,12 +34,32 @@ jobs:
 
       - name: Check lint
         run: |
-          ruff check src/skimage/filters/thresholding.py src/_skimage2/filters/thresholding.py tests/skimage/filters/test_thresholding.py tests/skimage2/filters/test_thresholding.py tests/skimage/test_migration.py
+          ruff check .
 
       - name: Check formatting
         run: |
-          ruff format --check src/skimage/filters/thresholding.py src/_skimage2/filters/thresholding.py tests/skimage/filters/test_thresholding.py tests/skimage2/filters/test_thresholding.py tests/skimage/test_migration.py
+          # Markdown is excluded because 4 existing docs fail and are left as is.
+          # --extend-exclude keeps Ruff's default excludes; --exclude would drop them.
+          ruff format --check --extend-exclude '*.md' .
 
-      - name: Run focused tests
+      # Fixed regression suite for ACME-142. It is not selected from the PR's
+      # changes and does not validate other behavior.
+      - name: Run ACME-142 regression tests
         run: |
           python -m pytest -q tests/skimage/filters/test_thresholding.py tests/skimage2/filters/test_thresholding.py tests/skimage/test_migration.py
+
+      - name: Record validation scope
+        if: always()
+        run: |
+          {
+            echo "### Validation scope (see step results for pass/fail)"
+            echo "**Checked**"
+            echo "- Ruff lint and format: non-ignored Python files in the checked-out code, using its own Ruff config"
+            echo "- Tests: ACME-142 regression files only"
+            echo ""
+            echo "**Not checked**"
+            echo "- Behavior of Python changes outside ACME-142"
+            echo "- Full test suite, other platforms or Python versions, doctests, docs build, typing"
+            echo "- Markdown formatting, including Python code blocks in Markdown"
+            echo "- Cython files (.pyx)"
+          } >> "$GITHUB_STEP_SUMMARY"
